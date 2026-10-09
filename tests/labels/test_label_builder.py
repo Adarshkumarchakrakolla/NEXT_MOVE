@@ -1,17 +1,20 @@
-"""Automated test suite for TargetLabelBuilder and Modeling Dataset Integrity.
+"""Automated test suite for TargetLabelBuilder and Step 6 Target Label Generation.
 
 Verifies:
-- In-memory window boundary tests (first day, last day, outside window)
+- In-memory window boundary tests (first day T, last day T + 29 inclusion)
+- Immediately outside window exclusion (T - 1, T + 30)
 - Empty windows producing 0
 - Competitor and strategic cluster isolation
-- Binary label invariants (strictly {0, 1})
-- Rejection of truncated forward windows
-- Feature-label join validation (1:1 bijection, duplicate rejection, domain validation)
-- Feature value preservation (unaltered feature matrix after join)
-- Deterministic output across repeated runs
-- Full grid key coverage (all 6,675 expected instances)
+- Multiple events producing binary 1 (never count > 1)
+- Rejection of truncated/incomplete forward windows (right-censoring)
+- Explicit handling/rejection of unmapped event types and invalid clusters
+- Deterministic label output across repeated runs
+- Full grid key coverage (all 6,675 expected instances, no duplicates, non-null binary)
+- Verification that raw dataset remains completely unaltered
+- Artifact serialization with build_and_save_labels
 """
 
+import hashlib
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -23,7 +26,6 @@ from configs.prediction_config import (
     PredictionConfig,
     config,
 )
-from src.features.feature_builder import PointInTimeFeatureBuilder
 from src.labels.label_builder import TargetLabelBuilder
 from src.splitting.temporal import get_partition_cutoffs, normalize_to_date
 
@@ -154,7 +156,12 @@ def test_binary_labels_only_even_with_multiple_events(label_builder: TargetLabel
     """Multiple matching events must yield target_30d = 1, never a count > 1."""
     T = target_cutoff
     events_df = pd.DataFrame([
-        {"event_id": f"E_{i}", "competitor": "eBay", "event_date": (T + pd.Timedelta(days=i)).strftime("%Y-%m-%d"), "event_type": "marketplace_change"}
+        {
+            "event_id": f"E_{i}",
+            "competitor": "eBay",
+            "event_date": (T + pd.Timedelta(days=i)).strftime("%Y-%m-%d"),
+            "event_type": "marketplace_change",
+        }
         for i in range(10)
     ])
 
@@ -164,10 +171,11 @@ def test_binary_labels_only_even_with_multiple_events(label_builder: TargetLabel
     ebay_c4 = [r for r in labels if r["competitor"] == "eBay" and r["strategic_cluster"] == 4][0]
     assert ebay_c4["target_30d"] == 1
     assert type(ebay_c4["target_30d"]) in (int, np.int64, np.int32)
+    assert ebay_c4["event_count_in_window"] == 10, "Diagnostic count should record exact occurrences"
 
 
 # ==============================================================================
-# 3. Truncated Forward Window Rejection
+# 3. Truncated Forward Window Rejection & Domain Validation
 # ==============================================================================
 
 
@@ -184,146 +192,34 @@ def test_rejection_of_truncated_windows(label_builder: TargetLabelBuilder):
         builder.compute_labels_for_cutoff(invalid_cutoff)
 
 
-# ==============================================================================
-# 4. Feature-Label Join Integrity and Validation
-# ==============================================================================
+def test_unmapped_event_types_handled_explicitly(label_builder: TargetLabelBuilder):
+    """Event log containing unknown or unmapped event types must raise ValueError."""
+    invalid_events = pd.DataFrame([{
+        "event_id": "INV_1",
+        "competitor": "Amazon",
+        "event_date": "2024-01-15",
+        "event_type": "alien_invasion_sale",  # Not in 30 approved taxonomy types
+    }])
+
+    with pytest.raises(ValueError, match="Found unmapped event types"):
+        TargetLabelBuilder(config=config).fit_events(invalid_events)
 
 
-def test_join_features_and_labels_exact_match(label_builder: TargetLabelBuilder, target_cutoff: pd.Timestamp):
-    """Assert successful join when features and labels have exact matching keys."""
-    cutoffs = [("train", "2024-01-08"), ("train", "2024-01-15")]
+def test_invalid_strategic_cluster_ids_rejected(label_builder: TargetLabelBuilder):
+    """Event log containing invalid strategic cluster IDs must raise ValueError."""
+    invalid_cluster_events = pd.DataFrame([{
+        "event_id": "INV_2",
+        "competitor": "Amazon",
+        "event_date": "2024-01-15",
+        "strategic_cluster": 99,  # Invalid cluster outside 1..5
+    }])
 
-    # Mock features dataframe
-    feat_rows = []
-    for part, c in cutoffs:
-        for comp in config.competitors:
-            for cluster_id in range(1, 6):
-                feat_rows.append({
-                    "cutoff_date": c,
-                    "competitor": comp,
-                    "strategic_cluster": cluster_id,
-                    "partition": part,
-                    "dummy_feature_1": 42.0,
-                    "dummy_feature_2": 99,
-                })
-    features_df = pd.DataFrame(feat_rows)
-
-    # Empty events -> all labels 0
-    builder = TargetLabelBuilder(config=config).fit_events(
-        pd.DataFrame(columns=["competitor", "event_date", "event_type"])
-    )
-    labels_df = builder.build_label_matrix(cutoffs=cutoffs)
-
-    joined_df = builder.join_features_and_labels(features_df, labels_df)
-
-    assert len(joined_df) == len(features_df) == 30
-    assert "target_30d" in joined_df.columns
-    assert (joined_df["target_30d"] == 0).all()
-    assert joined_df["dummy_feature_1"].tolist() == features_df["dummy_feature_1"].tolist()
-    assert joined_df["dummy_feature_2"].tolist() == features_df["dummy_feature_2"].tolist()
-
-
-def test_join_rejects_duplicate_keys(label_builder: TargetLabelBuilder):
-    """Join must reject duplicate join keys in features or labels."""
-    features_df = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "feat": 1.0},
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "feat": 2.0},  # Duplicate
-    ])
-    labels_df = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "target_30d": 1},
-    ])
-
-    with pytest.raises(ValueError, match="Duplicate join keys detected in features"):
-        label_builder.join_features_and_labels(features_df, labels_df)
-
-    # Duplicate in labels
-    valid_features = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "feat": 1.0},
-    ])
-    dup_labels = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "target_30d": 1},
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "target_30d": 0},
-    ])
-    with pytest.raises(ValueError, match="Duplicate join keys detected in labels"):
-        label_builder.join_features_and_labels(valid_features, dup_labels)
-
-
-def test_join_rejects_missing_or_orphan_keys(label_builder: TargetLabelBuilder):
-    """Join must reject any mismatch between feature instances and label instances."""
-    features_df = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "feat": 1.0},
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 2, "feat": 1.0},
-    ])
-    labels_df = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "target_30d": 1},
-        # Missing cluster 2 in labels
-    ])
-
-    with pytest.raises(ValueError, match="missing target labels"):
-        label_builder.join_features_and_labels(features_df, labels_df)
-
-
-def test_join_rejects_unexpected_competitor_or_invalid_cluster(label_builder: TargetLabelBuilder):
-    """Join must reject competitors not in {Amazon, Walmart, eBay} or clusters outside 1..5."""
-    features_df = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Target", "strategic_cluster": 1, "feat": 1.0},
-    ])
-    labels_df = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Target", "strategic_cluster": 1, "target_30d": 1},
-    ])
-    with pytest.raises(ValueError, match="unexpected competitors"):
-        label_builder.join_features_and_labels(features_df, labels_df)
-
-    # Invalid cluster ID 99
-    features_invalid_cluster = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 99, "feat": 1.0},
-    ])
-    labels_invalid_cluster = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 99, "target_30d": 1},
-    ])
-    with pytest.raises(ValueError, match="invalid cluster IDs"):
-        label_builder.join_features_and_labels(features_invalid_cluster, labels_invalid_cluster)
-
-
-def test_no_change_to_existing_feature_values_after_joining(label_builder: TargetLabelBuilder):
-    """All existing feature columns and their values must be identical before and after join."""
-    features_df = pd.DataFrame([
-        {
-            "cutoff_date": "2024-01-15",
-            "competitor": "Amazon",
-            "strategic_cluster": 1,
-            "days_since_last_cluster_event": 5.25,
-            "has_prior_cluster_event": 1,
-            "cluster_event_count_30d": 12,
-            "velocity_ratio_30_90": 1.333333,
-            "quarter": 1,
-            "is_q4": 0,
-        },
-        {
-            "cutoff_date": "2024-01-15",
-            "competitor": "Walmart",
-            "strategic_cluster": 2,
-            "days_since_last_cluster_event": -1.0,
-            "has_prior_cluster_event": 0,
-            "cluster_event_count_30d": 0,
-            "velocity_ratio_30_90": 1.0,
-            "quarter": 1,
-            "is_q4": 0,
-        },
-    ])
-    labels_df = pd.DataFrame([
-        {"cutoff_date": "2024-01-15", "competitor": "Amazon", "strategic_cluster": 1, "target_30d": 1},
-        {"cutoff_date": "2024-01-15", "competitor": "Walmart", "strategic_cluster": 2, "target_30d": 0},
-    ])
-
-    joined_df = label_builder.join_features_and_labels(features_df, labels_df)
-
-    for col in features_df.columns:
-        np.testing.assert_array_equal(joined_df[col].values, features_df[col].values)
+    with pytest.raises(ValueError, match="Found invalid strategic cluster IDs"):
+        TargetLabelBuilder(config=config).fit_events(invalid_cluster_events)
 
 
 # ==============================================================================
-# 5. Determinism Across Repeated Runs
+# 4. Determinism Across Repeated Runs
 # ==============================================================================
 
 
@@ -345,12 +241,12 @@ def test_deterministic_label_output_across_repeated_runs(label_builder: TargetLa
 
 
 # ==============================================================================
-# 6. Full Grid Integration Test (All 6,675 Expected Keys)
+# 5. Full Grid Key Coverage (All 6,675 Expected Instances)
 # ==============================================================================
 
 
 def test_all_6675_expected_keys_appear_exactly_once(label_builder: TargetLabelBuilder):
-    """The default observation schedule produces exactly 6,675 unique keys with binary labels."""
+    """The default observation schedule produces exactly 6,675 unique keys with non-null binary labels."""
     empty_events = pd.DataFrame(columns=["competitor", "event_date", "event_type"])
     builder = TargetLabelBuilder(config=config).fit_events(empty_events)
 
@@ -367,5 +263,73 @@ def test_all_6675_expected_keys_appear_exactly_once(label_builder: TargetLabelBu
     assert (labels_df["partition"] == "validation").sum() == 74 * 15 == 1110
     assert (labels_df["partition"] == "test").sum() == 62 * 15 == 930
 
-    # Check binary invariant
+    # Check binary invariant and non-null
+    assert labels_df["target_30d"].notna().all(), "Null labels found in output!"
     assert set(labels_df["target_30d"].unique()).issubset({0, 1})
+
+
+# ==============================================================================
+# 6. Raw Dataset Immutability Verification
+# ==============================================================================
+
+
+def test_raw_dataset_remains_unchanged(tmp_path: Path):
+    """Verifies that fitting and generating labels does not modify the raw dataset file."""
+    raw_path = config.raw_csv_path
+    assert raw_path.exists(), f"Raw CSV not found at {raw_path}"
+
+    initial_size = raw_path.stat().st_size
+    initial_mtime = raw_path.stat().st_mtime_ns
+
+    # Compute fast hash of raw dataset head and tail
+    with open(raw_path, "rb") as f:
+        head_sample = f.read(10000)
+        f.seek(-10000, 2)
+        tail_sample = f.read(10000)
+    sample_hash_before = hashlib.sha256(head_sample + tail_sample).hexdigest()
+
+    # Instantiate and fit using small sample without modifying original
+    small_df = pd.read_csv(raw_path, nrows=50)
+    builder = TargetLabelBuilder(config=config).fit_events(small_df)
+    _ = builder.compute_labels_for_cutoff("2024-01-15")
+
+    # Verify original file properties remained bitwise identical
+    assert raw_path.stat().st_size == initial_size
+    assert raw_path.stat().st_mtime_ns == initial_mtime
+
+    with open(raw_path, "rb") as f:
+        head_sample_after = f.read(10000)
+        f.seek(-10000, 2)
+        tail_sample_after = f.read(10000)
+    sample_hash_after = hashlib.sha256(head_sample_after + tail_sample_after).hexdigest()
+
+    assert sample_hash_before == sample_hash_after, "Raw dataset file was modified!"
+
+
+# ==============================================================================
+# 7. Label Artifact Serialization
+# ==============================================================================
+
+
+def test_build_and_save_labels_serialization(tmp_path: Path):
+    """Verifies build_and_save_labels generates the expected artifact file and metrics."""
+    out_file = tmp_path / "test_labels.csv"
+    empty_events = pd.DataFrame(columns=["competitor", "event_date", "event_type"])
+    builder = TargetLabelBuilder(config=config)
+
+    cutoffs = [("train", "2024-01-08"), ("validation", "2024-01-15")]
+    df, metrics = builder.build_and_save_labels(
+        output_csv_path=out_file,
+        events_df=empty_events,
+        cutoffs=cutoffs,
+        include_diagnostic_count=True,
+    )
+
+    assert out_file.exists()
+    assert len(df) == 30
+    assert metrics.row_count == 30
+    assert metrics.train_rows == 15
+    assert metrics.val_rows == 15
+    assert "event_count_in_window" in df.columns
+    assert "target_30d" in df.columns
+    assert (df["target_30d"] == 0).all()

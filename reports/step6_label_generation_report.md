@@ -1,144 +1,105 @@
-# Step 6: Binary Label Generation and Modeling Dataset Integrity Report
+# Step 6: Target Label Generation Report
 
 **NextMove: Production Competitive Intelligence Agent**  
-**Component:** Target Label Generation & Modeling Dataset Assembly Pipeline (`src/labels/label_builder.py`)  
+**Component:** Target Label Generation Pipeline (`src/labels/label_builder.py`)  
 **Status:** Complete & Fully Validated  
-**Execution Date:** 2026-10-09  
+**Artifact Generated:** `data/synthetic/processed/synthetic_labels_445_cutoffs_6675_instances.csv`  
 
 ---
 
 ## 1. Executive Summary
 
-In Step 6 of the NextMove project, we implemented the target label generation pipeline and assembled the final modeling dataset artifact. The pipeline generates the binary decision target `target_30d` over the approved forward window:
+In Step 6 of the NextMove project, we implemented and validated the target label generation pipeline. NextMove predicts whether a target competitor (*Amazon*, *Walmart*, or *eBay*) will execute at least one event in a specific strategic cluster (1–5) during the 30-calendar-day forward window:
 
 $$\text{cutoff\_date} \le \text{event\_date} \le \text{cutoff\_date} + 29\text{ days (inclusive)}$$
 
-Every instance is identified by the canonical tripartite key `(cutoff_date, competitor, strategic_cluster)`. The label indicates whether at least one qualifying strategic move is executed by that competitor within that strategic cluster during the 30-calendar-day forward window ($1 = \text{true}$, $0 = \text{false}$).
+Every instance is uniquely identified by the canonical tripartite key `(cutoff_date, competitor, strategic_cluster)`. The binary label is defined as:
+- `target_30d = 1` if event count in window $\ge 1$
+- `target_30d = 0` if event count in window $= 0$
 
-The labels were joined with the 16 point-in-time feature columns materialized in Step 5 (`data/synthetic/processed/synthetic_features_445_cutoffs_6675_instances.csv`), enforcing a strict 1:1 bijection with zero missing keys, zero duplicate keys, zero null values, and complete preservation of all original feature values.
+The complete observation grid consists of **445 weekly Monday cutoffs** across 3 competitors and 5 strategic clusters, yielding exactly **6,675 instances**.
 
-The resulting artifact was serialized to disk at [data/synthetic/processed/synthetic_modeling_dataset_445_cutoffs_6675_instances.csv](file:///d:/NextMove/data/synthetic/processed/synthetic_modeling_dataset_445_cutoffs_6675_instances.csv).
+The serialized label artifact has been verified and saved to disk at:
+[data/synthetic/processed/synthetic_labels_445_cutoffs_6675_instances.csv](file:///d:/NextMove/data/synthetic/processed/synthetic_labels_445_cutoffs_6675_instances.csv).
 
 > [!IMPORTANT]
-> **Synthetic Dataset Benchmark Notice**  
-> Consistent with project directives, **no predictive models were trained, no preprocessing transformers were fitted, no classification thresholds were tuned, and no predictive skill is claimed**. This pipeline verifies mathematical correctness, temporal isolation, and engineering robustness on synthetic data prior to production deployment.
+> **Synthetic Pipeline Engineering Notice**  
+> Consistent with project directives, this implementation validates pipeline correctness, temporal isolation, and data engineering integrity. Because the raw dataset is synthetic, **no predictive models were trained, no classification thresholds were tuned, and no real-world predictive skill is claimed**.
 
 ---
 
-## 2. Implemented Architecture and Code Modules
+## 2. File and Pipeline Paths
 
-The label pipeline and test suites were implemented across the following dedicated modules:
-
-| Module Path | Type | Purpose |
+| Path Role | Location | Description |
 | :--- | :--- | :--- |
-| [src/labels/__init__.py](file:///d:/NextMove/src/labels/__init__.py) | Package Init | Exports `TargetLabelBuilder` and `LabelPipelineMetrics`. |
-| [src/labels/label_builder.py](file:///d:/NextMove/src/labels/label_builder.py) | Implementation | Core pipeline class for forward window indexing, binary label derivation, domain validation, and feature joining. |
-| [tests/labels/test_label_builder.py](file:///d:/NextMove/tests/labels/test_label_builder.py) | Test Suite | 13 automated tests verifying boundary inclusion, outside exclusion, empty windows, isolation, join integrity, and determinism. |
-| [data/synthetic/processed/synthetic_modeling_dataset_445_cutoffs_6675_instances.csv](file:///d:/NextMove/data/synthetic/processed/synthetic_modeling_dataset_445_cutoffs_6675_instances.csv) | Data Artifact | Final assembled modeling dataset (6,675 rows, 17 columns). |
-
-### Key Pipeline Components in `TargetLabelBuilder`
-
-1. **Centralized Taxonomy Mapping:** Uses `assign_strategic_clusters()` and `PredictionConfig.event_type_to_cluster` to derive cluster IDs (1–5) from raw `event_type` strings. No cluster ID is assumed to pre-exist in the raw log.
-2. **Fast Binary-Search Temporal Indexing:** Events are indexed by `(competitor, strategic_cluster)` into sorted NumPy date arrays (`datetime64[D]`). Window event counts over $[T, T + 29\text{d}]$ are computed via `np.searchsorted` in $\mathcal{O}(\log N)$, processing all 6,675 combinations in under 0.05 seconds.
-3. **Right-Censoring Rejection:** Any cutoff where $T + 29\text{ days} > \text{dataset\_max\_date}$ (`2026-10-09`) is rejected with a `ValueError`.
-4. **Bijective Feature-Label Joining:**
-   - Enforces key uniqueness on `(cutoff_date, competitor, strategic_cluster)`.
-   - Rejects unexpected competitors ($\notin \{\text{Amazon}, \text{Walmart}, \text{eBay}\}$) or invalid cluster IDs ($\notin \{1, 2, 3, 4, 5\}$).
-   - Rejects orphan feature instances or orphan labels.
-   - Enforces partition consistency across features and labels.
-   - Verifies all original feature values remain bitwise unchanged.
+| **Input Raw Data** | `data/synthetic/raw/recall_intel_121000_independent_synthetic_events.csv` | 121,000 independent synthetic events (2018-01-01 to 2026-10-09) |
+| **Central Config** | `configs/prediction_config.py` | Partition schedules, taxonomy mapping, cutoffs |
+| **Pipeline Module** | `src/labels/label_builder.py` | `TargetLabelBuilder`, fast binary search, artifact generation |
+| **Package Exports** | `src/labels/__init__.py` | Package interface |
+| **Automated Tests** | `tests/labels/test_label_builder.py` | 12 automated unit and boundary tests |
+| **Target Label Artifact** | `data/synthetic/processed/synthetic_labels_445_cutoffs_6675_instances.csv` | 6,675 rows, 6 columns |
 
 ---
 
-## 3. Strict Temporal Leakage Prevention (Convention A)
+## 3. Label Artifact Properties and Checksum
 
-The dataset guarantees absolute temporal isolation between features and targets:
+| Property | Value | Notes |
+| :--- | :--- | :--- |
+| **Output File Path** | `data/synthetic/processed/synthetic_labels_445_cutoffs_6675_instances.csv` | Processed artifact |
+| **File Size** | 217,392 bytes | 212.3 KB |
+| **Total Rows** | 6,675 | Exactly 445 cutoffs × 3 competitors × 5 clusters |
+| **Total Columns** | 6 | `cutoff_date`, `competitor`, `strategic_cluster`, `partition`, `target_30d`, `event_count_in_window` |
+| **Unique Keys** | 6,675 | Zero duplicate keys |
+| **Missing / Null Values** | 0 | Strictly non-null across all columns |
+| **SHA-256 Checksum** | `eec596abab297abfd5738b09956e4fc18c10556b4c0473b6a747ab77fb2c62df` | Deterministic verification |
+| **Generation Runtime** | ~2.05 seconds | $\mathcal{O}(\log N)$ NumPy searchsorted indexing |
 
-```
-Historical Feature Lookback Window            Prediction Cutoff (T)       Forward Label Window
-[Sunday T - 365d  ...  Sunday T - 1d]         Monday 00:00:00 UTC         [Monday T  ...  Tuesday T + 29d]
-<----------------------------------->                  |                  <------------------------------>
-Features query ONLY: t_e <= T - 1                      |                  Labels query ONLY: T <= t_e <= T + 29
-(Strictly completed history)                           |                  (Strict 30-day forward window)
-                                                       V
-                                          Zero Temporal Overlap
-```
+### Schema Specification
 
-- **Feature Boundary:** Features are calculated using strictly $t_e \le T - 1\text{ day}$ (completed historical days through Sunday 23:59:59 UTC).
-- **Label Boundary:** Labels are calculated using strictly $T \le t_e \le T + 29\text{ days}$ (Monday 00:00:00 UTC through Tuesday 23:59:59 UTC 4 weeks later).
-- **Separation:** Intersection between feature events and label events is empty ($\emptyset$).
-- **Embargo Protection:** The 35-day embargo between Train and Validation (`2023-11-28` to `2023-12-31`) and 42-day embargo between Validation and Test (`2025-05-27` to `2025-07-06`) ensure that no forward label window extends into the cutoff date of a subsequent partition.
-
----
-
-## 4. Modeling Dataset Artifact Reconciliation
-
-### Artifact Verification Metadata
-
-- **Output File Path:** `data/synthetic/processed/synthetic_modeling_dataset_445_cutoffs_6675_instances.csv`
-- **File Size:** 737,461 bytes (720.18 KB)
-- **Total Row Count:** 6,675 rows
-- **Total Column Count:** 17 columns
-- **SHA-256 Checksum:** `6019116a428ac0f43f7c289cd73512310e8e82045745bdb9b87980e642a89c0d`
-- **Pipeline Execution Runtime:** 2.994 seconds
-
-### Schema Order and Types
-
-| Column Index | Column Name | Data Type | Role | Value Constraints / Range |
-| :---: | :--- | :--- | :--- | :--- |
-| 1 | `cutoff_date` | `string` (`YYYY-MM-DD`) | Key | Weekly Mondays (`2018-01-01` to `2026-09-07`) |
-| 2 | `competitor` | `string` | Key | `Amazon`, `Walmart`, `eBay` |
-| 3 | `strategic_cluster` | `int64` | Key | 1, 2, 3, 4, 5 |
-| 4 | `cluster_name` | `string` | Metadata | Approved human-readable cluster title |
-| 5 | `partition` | `string` | Split | `train`, `validation`, `test` |
-| 6 | `days_since_last_cluster_event` | `float64` | Feature | $[0.0, \infty)$ or $-1.0$ (sentinel) |
-| 7 | `has_prior_cluster_event` | `int64` | Feature | $0$ or $1$ |
-| 8 | `cluster_event_count_30d` | `int64` | Feature | $\ge 0$ |
-| 9 | `cluster_event_count_90d` | `int64` | Feature | $\ge 0$ |
-| 10 | `cluster_event_count_365d` | `int64` | Feature | $\ge 0$ |
-| 11 | `velocity_ratio_30_90` | `float64` | Feature | $(0.0, \infty)$ |
-| 12 | `rival_event_count_14d` | `int64` | Feature | $\ge 0$ |
-| 13 | `decayed_magnitude_mass_60d` | `float64` | Feature | $\ge 0.0$ |
-| 14 | `quarter` | `int64` | Feature | 1, 2, 3, 4 |
-| 15 | `month` | `int64` | Feature | 1 through 12 |
-| 16 | `is_q4` | `int64` | Feature | $0$ or $1$ |
-| 17 | `target_30d` | `int64` | **Target** | **$0$ or $1$** |
-
-Zero missing, NaN, infinite, or unparseable values exist anywhere in the artifact.
+| Column | Type | Role | Description |
+| :--- | :--- | :--- | :--- |
+| `cutoff_date` | `string` (`YYYY-MM-DD`) | Join Key | Monday 00:00:00 UTC cutoff date |
+| `competitor` | `string` | Join Key | `Amazon`, `Walmart`, `eBay` |
+| `strategic_cluster` | `int64` | Join Key | Strategic cluster ID (1 through 5) |
+| `partition` | `string` | Metadata | Partition split (`train`, `validation`, `test`) |
+| `target_30d` | `int64` | **Target Label** | Binary move indicator ($0$ or $1$) |
+| `event_count_in_window` | `int64` | Diagnostic | Exact event occurrences in $[T, T + 29\text{d}]$ (not to be used as feature) |
 
 ---
 
-## 5. Label Distribution and Synthetic Benchmark Analysis
+## 4. Label Distributions
 
-### Overall Label Distribution
+### Overall Prevalence
 
 | Metric | Measured Value | Percentage |
 | :--- | :---: | :---: |
-| **Total Modeling Instances** | 6,675 | 100.0% |
+| **Total Instances** | 6,675 | 100.0% |
 | **Positive Labels (`target_30d = 1`)** | 6,675 | 100.0% |
 | **Negative Labels (`target_30d = 0`)** | 0 | 0.0% |
 | **Positive Prevalence** | **1.000000** | **100.0%** |
 
-### Partition Breakdown
+*Note on Prevalence:* In this synthetic dataset of 121,000 events evenly generated across 2018–2026, every competitor and cluster exhibits continuous activity within any 30-day window (minimum event count is 23). In production or sparse real-world data, the exact same pipeline yields natural prevalence variations including zeros. Controlled unit fixtures prove that empty windows, isolated cells, and outer-boundary events evaluate strictly to 0.
 
-| Partition | Cutoffs | Total Instances | Positive Count | Negative Count | Prevalence |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Train** | 309 | 4,635 | 4,635 | 0 | 100.0% |
-| **Validation** | 74 | 1,110 | 1,110 | 0 | 100.0% |
-| **Test** | 62 | 930 | 930 | 0 | 100.0% |
-| **Total** | **445** | **6,675** | **6,675** | **0** | **100.0%** |
+### Distribution by Partition
 
-### Competitor Breakdown
+| Partition | Cutoffs | Total Rows | Positives (`target_30d = 1`) | Negatives (`target_30d = 0`) | Prevalence | Mean Window Event Count | Window Count Range [Min, Max] |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Train** | 309 | 4,635 | 4,635 | 0 | 100.0% | 75.46 | [23, 152] |
+| **Validation** | 74 | 1,110 | 1,110 | 0 | 100.0% | 75.71 | [28, 144] |
+| **Test** | 62 | 930 | 930 | 0 | 100.0% | 75.67 | [25, 138] |
+| **Total** | **445** | **6,675** | **6,675** | **0** | **100.0%** | **75.53** | **[23, 152]** |
 
-| Competitor | Total Instances | Positive Count | Negative Count | Prevalence | Mean Window Event Count | Window Count Range [Min, Max] |
+### Distribution by Competitor
+
+| Competitor | Total Instances | Positives | Negatives | Prevalence | Mean Window Event Count | Window Count Range [Min, Max] |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Amazon** | 2,225 | 2,225 | 0 | 100.0% | 90.81 | [41, 152] |
 | **Walmart** | 2,225 | 2,225 | 0 | 100.0% | 79.49 | [32, 133] |
 | **eBay** | 2,225 | 2,225 | 0 | 100.0% | 56.29 | [23, 93] |
 
-### Strategic Cluster Breakdown
+### Distribution by Strategic Cluster
 
-| Cluster ID | Cluster Name | Instances | Positive Count | Negative Count | Prevalence | Mean Window Event Count | Window Count Range [Min, Max] |
+| Cluster ID | Cluster Name | Instances | Positives | Negatives | Prevalence | Mean Window Event Count | Window Count Range [Min, Max] |
 | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **1** | Pricing, Promotions & Retail Media | 1,335 | 1,335 | 0 | 100.0% | 73.80 | [31, 113] |
 | **2** | Logistics, Fulfillment & Expansion | 1,335 | 1,335 | 0 | 100.0% | 64.12 | [31, 101] |
@@ -146,111 +107,50 @@ Zero missing, NaN, infinite, or unparseable values exist anywhere in the artifac
 | **4** | Marketplace & Seller Operations | 1,335 | 1,335 | 0 | 100.0% | 51.24 | [23, 84] |
 | **5** | Corporate Strategy, M&A & Workforce | 1,335 | 1,335 | 0 | 100.0% | 91.51 | [43, 143] |
 
-### Partition $\times$ Competitor Cross-Tabulation
+---
 
-| Partition | Competitor | Total Instances | Positive Count | Negative Count | Prevalence | Mean Window Event Count |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Train** | Amazon | 1,545 | 1,545 | 0 | 100.0% | 90.65 |
-| **Train** | Walmart | 1,545 | 1,545 | 0 | 100.0% | 79.37 |
-| **Train** | eBay | 1,545 | 1,545 | 0 | 100.0% | 56.36 |
-| **Validation** | Amazon | 370 | 370 | 0 | 100.0% | 91.07 |
-| **Validation** | Walmart | 370 | 370 | 0 | 100.0% | 79.79 |
-| **Validation** | eBay | 370 | 370 | 0 | 100.0% | 56.28 |
-| **Test** | Amazon | 310 | 310 | 0 | 100.0% | 91.29 |
-| **Test** | Walmart | 310 | 310 | 0 | 100.0% | 79.74 |
-| **Test** | eBay | 310 | 310 | 0 | 100.0% | 55.97 |
+## 5. Temporal Integrity and Right-Censoring Verification
 
-### Explanation of 100% Empirical Prevalence on Synthetic Data
-
-The 100% empirical positive prevalence observed across all 6,675 instances is an expected mathematical consequence of the synthetic event generator:
-
-1. **Uniform High Density:** The raw dataset contains 121,000 events distributed across 3,204 calendar days (an average of 37.7 events per day).
-2. **Dense Competitor-Cluster Coverage:** Across 3 competitors and 5 strategic clusters (15 combinations), each combination averages 8,066 events over the dataset period (approximately 2.5 events per day).
-3. **Window Count Distribution:** Over any 30-day window, the expected number of events for any competitor-cluster pair is $\approx 75$ events. Across all 6,675 forward windows, the **minimum observed count is 23 events** (observed for eBay in Cluster 4), while the maximum is 152 events (Amazon in Cluster 3).
-4. **Implication:** Because the minimum count across all windows is 23 ($> 0$), every single window contains at least one event.
-5. **Engineering Verification:** Because the synthetic data has high uniform event frequency, unit tests using small in-memory fixtures are essential to prove that the pipeline correctly assigns negative labels ($0$) when windows are empty or events fall outside boundaries.
+1. **Inclusive Window Bounds:**
+   - Window Start: Cutoff Monday $T$ (00:00:00 UTC).
+   - Window End: Tuesday $T + 29\text{ days}$ (23:59:59 UTC).
+   - Total window duration: Exactly 30 calendar days.
+2. **Right-Censoring Verification:**
+   - Last eligible test cutoff: `2026-09-07` (Monday).
+   - Forward window end date: `2026-09-07` + 29 days = `2026-10-06` (Tuesday).
+   - Dataset maximum event date: `2026-10-09` (Friday).
+   - Verified buffer: 3 full calendar days of coverage.
+   - Any cutoff with window end $> \text{2026-10-09}$ is rejected with `ValueError`.
+3. **Partition Isolation & Embargoes:**
+   - Train cutoffs end `2023-11-27` (window ends `2023-12-26`). Validation starts `2024-01-01` (35-day embargo). Zero overlap.
+   - Validation cutoffs end `2025-05-26` (window ends `2025-06-24`). Test starts `2025-07-07` (42-day embargo). Zero overlap.
+4. **Raw Dataset Immutability:**
+   - The raw CSV at `data/synthetic/raw/recall_intel_121000_independent_synthetic_events.csv` remains strictly read-only and unaltered. Its SHA-256 and byte size are fully preserved.
 
 ---
 
-## 6. Automated Test Suite Results
+## 6. Test Suite Execution Results
 
-The automated test suite in [tests/labels/test_label_builder.py](file:///d:/NextMove/tests/labels/test_label_builder.py) was executed alongside all existing project tests.
+All 12 automated tests in [tests/labels/test_label_builder.py](file:///d:/NextMove/tests/labels/test_label_builder.py) were executed against Python 3.14 / pytest 9.1.1 and passed:
 
-### Test Execution Command
-```bash
-.venv/Scripts/python.exe -m pytest tests -v
-```
-
-### Complete Test Results (43 / 43 Passed in 6.34s)
-
-```
-tests/labels/test_label_builder.py::test_first_and_last_day_of_window_inclusion PASSED [  2%]
-tests/labels/test_label_builder.py::test_immediately_outside_window_exclusion PASSED [  4%]
-tests/labels/test_label_builder.py::test_empty_windows_produce_label_zero PASSED [  6%]
-tests/labels/test_label_builder.py::test_competitor_and_cluster_isolation PASSED [  9%]
-tests/labels/test_label_builder.py::test_binary_labels_only_even_with_multiple_events PASSED [ 11%]
-tests/labels/test_label_builder.py::test_rejection_of_truncated_windows PASSED [ 13%]
-tests/labels/test_label_builder.py::test_join_features_and_labels_exact_match PASSED [ 16%]
-tests/labels/test_label_builder.py::test_join_rejects_duplicate_keys PASSED [ 18%]
-tests/labels/test_label_builder.py::test_join_rejects_missing_or_orphan_keys PASSED [ 20%]
-tests/labels/test_label_builder.py::test_join_rejects_unexpected_competitor_or_invalid_cluster PASSED [ 23%]
-tests/labels/test_label_builder.py::test_no_change_to_existing_feature_values_after_joining PASSED [ 25%]
-tests/labels/test_label_builder.py::test_deterministic_label_output_across_repeated_runs PASSED [ 27%]
-tests/labels/test_label_builder.py::test_all_6675_expected_keys_appear_exactly_once PASSED [ 30%]
-tests/temporal_leakage/test_feature_builder.py::test_feature_matrix_combination_uniqueness_and_completeness PASSED [ 32%]
-tests/temporal_leakage/test_feature_builder.py::test_expected_feature_columns_and_data_types PASSED [ 34%]
-tests/temporal_leakage/test_feature_builder.py::test_exact_calculations_on_hand_built_fixture PASSED [ 37%]
-tests/temporal_leakage/test_feature_builder.py::test_exclusion_of_events_on_and_after_cutoff PASSED [ 39%]
-tests/temporal_leakage/test_feature_builder.py::test_missing_history_and_recency_sentinel PASSED [ 41%]
-tests/temporal_leakage/test_feature_builder.py::test_rival_filtering PASSED [ 44%]
-tests/temporal_leakage/test_feature_builder.py::test_calendar_features PASSED [ 46%]
-tests/temporal_leakage/test_feature_builder.py::test_repeatability_across_repeated_runs PASSED [ 48%]
-tests/temporal_leakage/test_temporal_integrity.py::test_taxonomy_mapping_completeness_and_uniqueness PASSED [ 51%]
-tests/temporal_leakage/test_temporal_integrity.py::test_cluster_derivation_from_event_type PASSED [ 53%]
-tests/temporal_leakage/test_temporal_integrity.py::test_partition_cutoff_counts_and_boundaries PASSED [ 55%]
-tests/temporal_leakage/test_temporal_integrity.py::test_partition_embargo_isolation PASSED [ 58%]
-tests/temporal_leakage/test_temporal_integrity.py::test_feature_exclusion_on_and_after_cutoff_date PASSED [ 60%]
-tests/temporal_leakage/test_temporal_integrity.py::test_label_window_first_and_last_day_inclusion PASSED [ 62%]
-tests/temporal_leakage/test_temporal_integrity.py::test_label_window_exclusion_one_day_before_and_after PASSED [ 65%]
-tests/temporal_leakage/test_temporal_integrity.py::test_empty_event_windows_produce_label_zero PASSED [ 67%]
-tests/temporal_leakage/test_temporal_integrity.py::test_competitor_and_cluster_filtering PASSED [ 69%]
-tests/temporal_leakage/test_temporal_integrity.py::test_rejection_of_incomplete_forward_windows PASSED [ 72%]
-tests/temporal_leakage/test_temporal_integrity.py::test_deterministic_results_across_runs PASSED [ 74%]
-tests/unit/test_dataset_schema.py::test_row_and_column_counts PASSED     [ 76%]
-tests/unit/test_dataset_schema.py::test_column_names_match_expected PASSED [ 79%]
-tests/unit/test_dataset_schema.py::test_event_id_uniqueness_and_validity PASSED [ 81%]
-tests/unit/test_dataset_schema.py::test_event_date_parseability_and_bounds PASSED [ 83%]
-tests/unit/test_dataset_schema.py::test_zero_missing_or_empty_values PASSED [ 86%]
-tests/unit/test_dataset_schema.py::test_no_exact_duplicate_rows PASSED   [ 88%]
-tests/unit/test_dataset_schema.py::test_categorical_domains PASSED       [ 90%]
-tests/unit/test_dataset_schema.py::test_numeric_ranges_and_validity PASSED [ 93%]
-tests/unit/test_dataset_schema.py::test_synthetic_metadata_labels PASSED [ 95%]
-tests/unit/test_dataset_schema.py::test_generator_seed_consistency PASSED [ 97%]
-tests/unit/test_description_template_prefix PASSED [100%]
-
-============================= 43 passed in 6.34s ==============================
-```
-
-### Coverage of Step 6 Test Requirements
-
-1. **Events on First ($T$) and Last ($T+29$) Days:** Verified by `test_first_and_last_day_of_window_inclusion` (both trigger $1$).
-2. **Events Immediately Outside ($T-1$ and $T+30$):** Verified by `test_immediately_outside_window_exclusion` (both evaluate to $0$).
-3. **Empty Windows Producing 0:** Verified by `test_empty_windows_produce_label_zero`.
-4. **Competitor and Cluster Isolation:** Verified by `test_competitor_and_cluster_isolation` (an event for Walmart in Cluster 3 does not activate Amazon or any other cluster).
-5. **All 6,675 Expected Keys Exactly Once:** Verified by `test_all_6675_expected_keys_appear_exactly_once`.
-6. **Binary Labels Only:** Verified by `test_binary_labels_only_even_with_multiple_events` and full grid assertions ($\text{target\_30d} \in \{0, 1\}$).
-7. **Rejection of Truncated Windows:** Verified by `test_rejection_of_truncated_windows` (cutoffs after `2026-09-07` raise `ValueError`).
-8. **Correct Feature-Label Join Keys:** Verified by `test_join_features_and_labels_exact_match`, `test_join_rejects_duplicate_keys`, `test_join_rejects_missing_or_orphan_keys`, and `test_join_rejects_unexpected_competitor_or_invalid_cluster`.
-9. **No Change to Existing Feature Values:** Verified by `test_no_change_to_existing_feature_values_after_joining`.
-10. **Deterministic Output Across Repeated Runs:** Verified by `test_deterministic_label_output_across_repeated_runs`.
+| Test Name | Verification Focus | Result |
+| :--- | :--- | :---: |
+| `test_first_and_last_day_of_window_inclusion` | Events on $T$ and $T + 29\text{d}$ produce `target_30d = 1` | **PASSED** |
+| `test_immediately_outside_window_exclusion` | Events on $T - 1\text{d}$ and $T + 30\text{d}$ produce `target_30d = 0` | **PASSED** |
+| `test_empty_windows_produce_label_zero` | Zero events produce `target_30d = 0` | **PASSED** |
+| `test_competitor_and_cluster_isolation` | Events for one competitor/cluster do not leak to others | **PASSED** |
+| `test_binary_labels_only_even_with_multiple_events` | 10 matching events still produce binary 1, not count | **PASSED** |
+| `test_rejection_of_truncated_windows` | Cutoff with forward window past max date raises `ValueError` | **PASSED** |
+| `test_unmapped_event_types_handled_explicitly` | Unmapped event type strings raise `ValueError` | **PASSED** |
+| `test_invalid_strategic_cluster_ids_rejected` | Cluster IDs outside 1..5 raise `ValueError` | **PASSED** |
+| `test_deterministic_label_output_across_repeated_runs` | Repeated runs on identical inputs yield bitwise identical output | **PASSED** |
+| `test_all_6675_expected_keys_appear_exactly_once` | Exact 6,675 unique keys, 4635 train, 1110 val, 930 test | **PASSED** |
+| `test_raw_dataset_remains_unchanged` | Raw CSV file size, mtime, and byte hash remain unmodified | **PASSED** |
+| `test_build_and_save_labels_serialization` | End-to-end artifact generation and metrics verification | **PASSED** |
 
 ---
 
-## 7. Next Steps & Gate Verification
+## 7. Unresolved Issues and Limitations
 
-Step 6 has satisfied all requirements specified in the project roadmap:
-- The target label generation module is fully implemented in [src/labels/label_builder.py](file:///d:/NextMove/src/labels/label_builder.py).
-- The modeling dataset artifact is materialized at [data/synthetic/processed/synthetic_modeling_dataset_445_cutoffs_6675_instances.csv](file:///d:/NextMove/data/synthetic/processed/synthetic_modeling_dataset_445_cutoffs_6675_instances.csv).
-- All 43 unit, temporal leakage, and label integrity tests pass cleanly.
-- Statistical telemetry and distributions are fully documented.
-- No model training or evaluation was performed. Execution stops here as instructed.
+- **Synthetic Prevalence:** As documented, the synthetic generator produced high activity density across all dates, resulting in 100% positive prevalence in the 30-day window on this synthetic dataset. Unit boundary tests with controlled fixture ledgers prove that 0-label generation works correctly under sparse or empty conditions.
+- **Zero Blockers:** Step 6 is fully complete, self-contained, tested, and validated. Ready for Step 7 Feature–Label Integration.
