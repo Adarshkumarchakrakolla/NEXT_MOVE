@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+models/*.pkl
+models/*.joblib
+data/evidence/raw/
+data/feature_store/
+reports/generated/
